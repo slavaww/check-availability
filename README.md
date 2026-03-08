@@ -31,7 +31,7 @@ will go messages.
    - Write down the value User ID.
 9. Enter the data from points 7 and 8 in lines 8 and 10 in check_sites.sh
 
-   ### If you don’t need messages in Telegram or Slack":"
+   ### If you don’t need messages in Telegram or Slack
 
 10. Comment out lines 43-45 of the check_sites.sh file if you don’t need Telegram
 11. Comment out line 40 of the check_sites.sh file if you don’t need Slack
@@ -71,9 +71,9 @@ will go messages.
    - Запишите значение User ID.
 9. Впишите данные из пунктов 7 и 8 в строки 8 и 10 в check_sites.sh
 
-   ### Если не нужно сообщения в Телеграм или Слак":"
+   ### Если не нужно сообщения в Телеграм или Слак
 
 10. Закомментируйте строки 43-45 файла check_sites.sh если не нужен Телеграм
 11. Закомментируйте строку 40 файла check_sites.sh если не нужен Слак
 
-### Удачи"!"
+### Удачи
