@@ -1,62 +1,117 @@
 #!/bin/bash
 
-# sites.txt: file with list of sites
-SITES_FILE="sites.txt"
-# sites_status.txt: file for storing site statuses
-STATUS_FILE="sites_status.txt"
-# Check interval in minutes (2 minutes)
-CHECK_INTERVAL=2
-# Unavailability threshold in minutes (15 minutes)
-UNAVAILABLE_THRESHOLD=$((15 / CHECK_INTERVAL))
+# sites_monitor.conf: file with list of sites
+CONFIG_FILE="/etc/sites_monitor.conf"
+# Set maximum fails
+MAX_FAILS=2
 # Telegram Bot Token
-TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
+BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
 # Telegram Chat ID
-TELEGRAM_CHAT_ID="YOUR_TELEGRAM_CHAT_ID"
+CHAT_ID="YOUR_TELEGRAM_CHAT_ID"
+# Log
+LOG_FILE="/var/log/site_monitor.log"
+# Temporary file
+FAIL_COUNTER_FILE="/tmp/site_monitor_fails.tmp"
 
-cd "$(dirname "$0")"
+# Config checks
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "$timestamp ERROR: Configuration file $CONFIG_FILE not found" >> "$LOG_FILE"
+  exit 1
+fi
 
-# Function for sending notifications
-send_notification() {
-    local site=$1
-    DATA='{"channel":"Your channel","text":"The site '
-    DATA+="$site"
-    DATA+=" is unavailable for more than 15 minutes!"
+if [ ! -s "$CONFIG_FILE" ]; then
+  echo "$timestamp ERROR: Configuration file $CONFIG_FILE empty" >> "$LOG_FILE"
+  exit 1
+fi
+
+# Functions
+check_site() {
+  curl -I -s -o /dev/null -w "%{http_code}" --max-time 10 "$1"
+}
+
+send_alert() {
+    local msg="$1"
+
+    DATA='{"channel":"Your channel","text":"'
+    DATA+="$msg"
     DATA+='"}'
 
     # Send message to Slack
     curl -X POST -H 'Content-type: application/json' --data "$DATA" https://hooks.slack.com/services/TRXXXXXXX/XXXXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXX
 
-    ## Here you can add sending email or other types of notifications
-    # echo "The site $site is unavailable for more than 15 minutes!"
-
     ## Telegram part
-    # local message="The site $site is unavailable for more than 15 minutes!"
-    # curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    #     -d chat_id="${TELEGRAM_CHAT_ID}" \
-    #     -d text="${message}"
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -d chat_id="${CHAT_ID}" \
+        -d text="$msg" >/dev/null
 }
 
-# Initialize site status if file does not exist
-if [ ! -f "$STATUS_FILE" ]; then
-    > "$STATUS_FILE"
-    while IFS= read -r site; do
-        echo "$site 0" >> "$STATUS_FILE"
-    done < "$SITES_FILE"
-fi
+# getting counter
+get_fail_count() {
+  local domain="$1"
+  # We look for the domain in the file, take only numbers, if not, return 0
+  count=$(grep "^$domain " "$FAIL_COUNTER_FILE" 2>/dev/null | awk '{print $2}')
+  if [[ "$count" =~ ^[0-9]+$ ]]; then
+    echo "$count"
+  else
+    echo "0"
+  fi
+}
 
-# Checking website availability
-while IFS= read -r site; do
-    # Checking website availability
-    if curl -s --head --request GET "$site" | grep "200" > /dev/null; then
-        # Сайт доступен, сбрасываем счётчик недоступности
-        sed -i "s|^$site .*|$site 0|" "$STATUS_FILE"
-    else
-        # Сайт недоступен, увеличиваем счётчик недоступности
-        current_status=$(grep "^$site " "$STATUS_FILE" | awk '{print $2}')
-        new_status=$((current_status + 1))
-        sed -i "s|^$site .*|$site $new_status|" "$STATUS_FILE"
-        if [ "$new_status" -gt "$UNAVAILABLE_THRESHOLD" ]; then
-            send_notification "$site"
-        fi
+# counter installation
+set_fail_count() {
+  local domain="$1"
+  local count="$2"
+
+  # Checking that count is a number
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    count="0"
+  fi
+
+  # Create a temporary file
+  temp_file=$(mktemp)
+
+  # Delete the old entry if it exists
+  grep -v "^$domain " "$FAIL_COUNTER_FILE" 2>/dev/null > "$temp_file"
+
+  # Add a new entry if count > 0
+  if [ "$count" -gt 0 ]; then
+    echo "$domain $count" >> "$temp_file"
+  fi
+
+  # Move the temporary file to the permanent location
+  mv "$temp_file" "$FAIL_COUNTER_FILE" 2>/dev/null
+}
+
+# Reading a list of sites
+read_sites() {
+  grep -v '^#' "$CONFIG_FILE" | grep -v '^$'
+}
+
+# Initialization
+[ ! -f "$FAIL_COUNTER_FILE" ] && touch "$FAIL_COUNTER_FILE"
+timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+
+# Main loop
+while read -r site; do
+  [ -z "$site" ] && continue
+
+  domain=$(echo "$site" | awk -F/ '{print $3}')
+  response=$(check_site "$site")
+  fails=$(get_fail_count "$domain")
+
+  if [ "$response" -ne 200 ]; then
+    fails=$((fails + 1))
+    set_fail_count "$domain" "$fails"
+    echo "$timestamp [$domain] ERROR: HTTP $response (attempt $fails/$MAX_FAILS)" >> "$LOG_FILE"
+
+    if [ "$fails" -eq "$MAX_FAILS" ]; then
+      send_alert "🔴 $timestamp Website $site unavailable: HTTP $response"
     fi
-done < "$SITES_FILE"
+  else
+    if [ "$fails" -ge "$MAX_FAILS" ]; then
+      send_alert "✅ $timestamp Website $site available again"
+    fi
+    set_fail_count "$domain" 0
+    echo "$timestamp [$domain] OK: HTTP 200" >> "$LOG_FILE"
+  fi
+done < <(read_sites)
